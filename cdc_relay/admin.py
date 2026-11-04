@@ -17,8 +17,11 @@ def check_server(conn) -> dict[str, Any]:
             "SELECT current_setting('server_version_num')::int, current_setting('wal_level')"
         )
         version, wal_level = cur.fetchone()
-    if version < 100000:
-        raise SetupError("PostgreSQL 10 or newer is required for pgoutput")
+    if version < 140000:
+        raise SetupError(
+            "PostgreSQL 14 or newer is required (pgoutput's messages option, used for the "
+            "table-less outbox, arrived in 14)"
+        )
     if wal_level != "logical":
         raise SetupError(
             f"wal_level is {wal_level!r}; set wal_level = logical (postgresql.conf or "
@@ -97,15 +100,12 @@ def slot_status(conn, slot: str) -> dict[str, Any] | None:
     logical replication, so they are exported as metrics.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT current_setting('server_version_num')::int")
-        version = cur.fetchone()[0]
-        wal_status = "wal_status" if version >= 130000 else "NULL"
         cur.execute(
-            f"""
+            """
             SELECT active, active_pid, restart_lsn::text, confirmed_flush_lsn::text,
                    pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint,
                    pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint,
-                   {wal_status}
+                   wal_status
             FROM pg_replication_slots WHERE slot_name = %s
             """,
             (slot,),

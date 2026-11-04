@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pg-cdc-relay: a pgoutput stream, decoded</title>
+<meta name="description" content="One round of PostgreSQL 16 logical replication traffic, byte by byte, and the records pg-cdc-relay delivered from it.">
+<style>
+:root {{
+  --bg: #fbfbfa; --fg: #1d1f21; --muted: #5f6368; --line: #e3e3e0; --card: #ffffff;
+  --accent: #2f6f9f; --begin: #e8f1f8; --commit: #e9f5ec; --schema: #f4f4f2;
+  --change: #ffffff; --message: #fdf3e4; --code: #f2f2ef;
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    --bg: #15171a; --fg: #e6e6e3; --muted: #a0a4a8; --line: #2c3035; --card: #1c1f23;
+    --accent: #7fb3dc; --begin: #1a2733; --commit: #1b2a20; --schema: #1f2226;
+    --change: #1c1f23; --message: #2d2618; --code: #23272b;
+  }}
+}}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }}
+main {{ max-width: 1100px; margin: 0 auto; padding: 32px 16px 64px; }}
+h1 {{ font-size: 1.7rem; margin: 0 0 4px; }}
+h2 {{ font-size: 1.2rem; margin: 40px 0 8px; }}
+p {{ max-width: 760px; }}
+a {{ color: var(--accent); }}
+.muted {{ color: var(--muted); }}
+.links a {{ margin-right: 16px; }}
+.stats {{ display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0; }}
+.stat {{ background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 16px; min-width: 130px; }}
+.stat b {{ display: block; font-size: 1.4rem; }}
+.table {{ overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }}
+table {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
+th, td {{ text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }}
+th {{ font-weight: 600; color: var(--muted); background: var(--schema); }}
+tr.begin {{ background: var(--begin); }} tr.commit {{ background: var(--commit); }}
+tr.schema {{ background: var(--schema); }} tr.message {{ background: var(--message); }}
+.lsn {{ font-family: ui-monospace, Menlo, Consolas, monospace; white-space: nowrap; color: var(--muted); }}
+.tag {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }}
+details summary {{ cursor: pointer; color: var(--muted); font-size: 13px; }}
+pre, code {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }}
+pre {{ background: var(--code); padding: 10px; border-radius: 6px; overflow-x: auto; margin: 6px 0; }}
+code.hex {{ display: block; background: var(--code); padding: 6px 10px; border-radius: 6px;
+  margin-top: 6px; word-break: break-all; }}
+code.hex b {{ color: var(--accent); }}
+.legend span {{ display: inline-block; padding: 1px 8px; border-radius: 4px; margin-right: 6px;
+  border: 1px solid var(--line); font-size: 13px; }}
+footer {{ margin-top: 48px; color: var(--muted); font-size: 13px; }}
+</style>
+</head>
+<body>
+<main>
+<h1>A pgoutput stream, decoded</h1>
+<p class="muted">pg-cdc-relay {version}: change data capture for PostgreSQL over native logical replication.</p>
+<p class="links"><a href="{repo}">Source on GitHub</a><a href="https://codespaces.new/AkibUllah/pg-cdc-relay?quickstart=1">Run it in Codespaces</a><a href="records.json">records.json</a></p>
+
+<p>This is one round of the demo workload (a fictional courier booking parcels, with a transactional outbox) as PostgreSQL 16 streamed it over a logical replication slot. Each row is one message from the walsender. Its first byte is the message type, highlighted in the bytes. Next to it is what the decoder read, and below are the records the relay delivered with <code>examples/relay.yaml</code>. The capture is the fixture the test suite replays, so the page and the tests always agree.</p>
+
+<div class="stats">
+  <div class="stat"><b>{messages}</b>messages</div>
+  <div class="stat"><b>{transactions}</b>committed transactions</div>
+  <div class="stat"><b>{records}</b>records delivered</div>
+  <div class="stat"><b>{outbox}</b>outbox events</div>
+</div>
+
+<p>Things to look for:</p>
+<ul>
+  <li>The booking that was rolled back is not in the stream at all. The server only sends committed transactions, which is why the outbox events below can never describe a change that did not happen.</li>
+  <li>The second update of <code>SC-240002</code> carries <code>⟨unchanged TOAST⟩</code> for the large <code>notes</code> column.</li>
+  <li>Deletes only carry the key columns.</li>
+  <li>The rider event has no outbox table: it is a <code>pg_logical_emit_message</code> inside the transaction.</li>
+  <li>The non-transactional heartbeat arrives <em>before</em> the truncate transaction. The message reports the end of its record, which is the exact position where that transaction's commit starts.</li>
+</ul>
+
+<h2>The stream</h2>
+<p class="legend"><span style="background:var(--begin)">Begin</span><span style="background:var(--commit)">Commit</span><span style="background:var(--schema)">Relation</span><span style="background:var(--message)">logical message</span></p>
+<div class="table"><table>
+<thead><tr><th>position</th><th>message</th><th>decoded</th></tr></thead>
+<tbody>
+{stream_rows}
+</tbody></table></div>
+
+<h2>What the relay delivered</h2>
+<p>Table changes go to <code>swift.cdc.&lt;table&gt;</code> with <code>notes</code> dropped and phone numbers HMAC-masked. Outbox events go to <code>swift.events.&lt;aggregate_type&gt;</code> keyed by aggregate id. <code>sync_scratch</code> is excluded, and the outbox table's own rows are not republished. Ids are <code>&lt;commit LSN&gt;:&lt;position&gt;</code> and are stable across redelivery.</p>
+<div class="table"><table>
+<thead><tr><th>id</th><th>topic</th><th>key</th><th>value</th></tr></thead>
+<tbody>
+{record_rows}
+</tbody></table></div>
+
+<h2>Routing config</h2>
+<pre>{config}</pre>
+
+<footer>Generated by <code>scripts/build_site.py</code> from <code>tests/fixtures/demo_stream.jsonl</code>. MIT licensed.</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Environment / local state
+.env
+*.db
+*.sqlite3
+*.log
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Relay local state
+*.checkpoint.json
+deadletter*.jsonl
+
+# Static demo build
+_site/

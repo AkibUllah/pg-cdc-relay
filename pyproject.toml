@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pg-cdc-relay"
+version = "0.1.0"
+description = "Change data capture for PostgreSQL over native logical replication: pgoutput decoding, transactional outbox routing, at-least-once delivery to webhooks, Redis Streams or files."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Akib Jafor" }]
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Database",
+]
+dependencies = [
+  "psycopg2-binary>=2.9",
+  "pyyaml>=6.0",
+  "httpx>=0.26",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5.0"]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=4.1",
+  "ruff>=0.3",
+  "redis>=5.0",
+  "fakeredis>=2.20",
+]
+
+[project.scripts]
+cdc-relay = "cdc_relay.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/AkibUllah/pg-cdc-relay"
+
+[tool.setuptools.packages.find]
+include = ["cdc_relay*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = ["postgres: needs a PostgreSQL server with wal_level=logical (TEST_PG_DSN)"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]

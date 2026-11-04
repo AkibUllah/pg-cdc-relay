@@ -1,0 +1,59 @@
+# Postgres with logical decoding, the relay streaming to Redis Streams, and a demo writer.
+#   docker compose up --build
+#   docker compose exec redis redis-cli XRANGE swift.events.parcel - +
+#   curl localhost:8086/status
+services:
+  postgres:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4",
+              "-c", "max_wal_senders=4", "-c", "max_slot_wal_keep_size=1GB"]
+    environment:
+      POSTGRES_USER: courier
+      POSTGRES_PASSWORD: courier
+      POSTGRES_DB: courier
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U courier -d courier"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  relay:
+    build: .
+    environment:
+      CDC_CONFIG: /app/examples/compose.yaml
+      CDC_DSN: postgresql://courier:courier@postgres:5432/courier
+      CDC_LOG_LEVEL: INFO
+    ports:
+      - "8086:8086"
+    volumes:
+      - relaydata:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  demo:
+    build: .
+    command: ["demo", "--loop", "--interval", "10"]
+    environment:
+      CDC_DSN: postgresql://courier:courier@postgres:5432/courier
+    depends_on:
+      relay:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  relaydata:

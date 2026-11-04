@@ -1,0 +1,15 @@
+.venv
+.git
+.github
+.devcontainer
+tests
+bench
+docs
+_site
+state
+*.jsonl
+.pytest_cache
+.ruff_cache
+__pycache__
+.coverage
+.env

@@ -1,0 +1,27 @@
+# Config used by docker-compose.yml: every table is published (the compose Postgres user is a
+# superuser) and routing decides what leaves the relay. Records go to Redis Streams.
+slot: cdc_relay
+publication: cdc_relay
+checkpoint_path: /data/relay.checkpoint.json
+dead_letter_path: /data/deadletter.jsonl
+
+sink:
+  type: redis
+  redis_url: redis://redis:6379/0
+  stream_template: "{topic}"
+  maxlen: 100000
+
+routing:
+  include: ["public.*"]
+  exclude: ["public.sync_*"]
+  topic_template: "swift.cdc.{table}"
+  drop_columns:
+    public.parcels: [notes]
+  mask_columns:
+    public.parcels: [recipient_phone]
+    public.riders: [phone]
+  mask_salt: compose-demo-salt
+  outbox:
+    table: public.outbox
+    message_prefix: outbox
+    topic_prefix: "swift.events."

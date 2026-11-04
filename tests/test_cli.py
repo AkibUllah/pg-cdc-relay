@@ -45,7 +45,8 @@ def test_read_capture_rejects_other_files(tmp_path) -> None:
         list(read_capture(str(path)))
 
 
-def test_replay_to_a_file_with_the_example_config(tmp_path, capsys) -> None:
+def test_replay_to_a_file_with_the_example_config(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)  # the example config keeps its dead letter file in ./state
     out = tmp_path / "records.jsonl"
     code = main(
         [

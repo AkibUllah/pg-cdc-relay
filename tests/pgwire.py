@@ -51,7 +51,9 @@ def relation(oid: int, namespace: str, name: str, columns, identity: str = "d") 
     out = b"R" + struct.pack(">I", oid) + _s(namespace) + _s(name) + identity.encode()
     out += struct.pack(">h", len(columns))
     for col_name, type_oid, is_key in columns:
-        out += struct.pack(">B", 1 if is_key else 0) + _s(col_name) + struct.pack(">Ii", type_oid, -1)
+        out += (
+            struct.pack(">B", 1 if is_key else 0) + _s(col_name) + struct.pack(">Ii", type_oid, -1)
+        )
     return out
 
 
@@ -76,7 +78,9 @@ def delete(oid: int, old, old_kind: str = "K") -> bytes:
 
 def truncate(oids, cascade: bool = False, restart_identity: bool = False) -> bytes:
     options = (1 if cascade else 0) | (2 if restart_identity else 0)
-    return b"T" + struct.pack(">iB", len(oids), options) + b"".join(struct.pack(">I", o) for o in oids)
+    return (
+        b"T" + struct.pack(">iB", len(oids), options) + b"".join(struct.pack(">I", o) for o in oids)
+    )
 
 
 def message(lsn: int, prefix: str, content: bytes, transactional: bool = True) -> bytes:

@@ -291,7 +291,9 @@ def _truncate(r: _Reader) -> Truncate:
     count = r.int32()
     options = r.int8()
     oids = tuple(r.uint32() for _ in range(count))
-    return Truncate(relation_oids=oids, cascade=bool(options & 1), restart_identity=bool(options & 2))
+    return Truncate(
+        relation_oids=oids, cascade=bool(options & 1), restart_identity=bool(options & 2)
+    )
 
 
 def _message(r: _Reader) -> LogicalMessage:

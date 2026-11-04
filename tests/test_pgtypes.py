@@ -58,7 +58,10 @@ def test_values_that_do_not_parse_pass_through_as_text() -> None:
     [
         ("{}", []),
         ("{1,2,3}", ["1", "2", "3"]),
-        ('{a,"b c",NULL,"NULL","q\\"x","back\\\\slash"}', ["a", "b c", None, "NULL", 'q"x', "back\\slash"]),
+        (
+            '{a,"b c",NULL,"NULL","q\\"x","back\\\\slash"}',
+            ["a", "b c", None, "NULL", 'q"x', "back\\slash"],
+        ),
         ("[0:1]={7,8}", ["7", "8"]),
     ],
 )

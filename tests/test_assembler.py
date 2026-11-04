@@ -111,9 +111,10 @@ def test_truncate_and_transactional_message() -> None:
 
 def test_non_transactional_message_is_its_own_transaction() -> None:
     asm = TransactionAssembler()
-    txs = asm.feed(decode(pgwire.message(0x500, "audit", b"\xff\xfe", transactional=False)), 0x520)
+    txs = asm.feed(decode(pgwire.message(0x500, "audit", b"\xff\xfe", transactional=False)))
     [tx] = txs
-    assert tx.xid is None and tx.end_lsn == 0x520
+    assert tx.xid is None and (tx.commit_lsn, tx.end_lsn) == (0x4FF, 0x500)
+    assert tx.events[0].id == "0/4FF:0"
     assert tx.events[0].to_dict()["content_hex"] == "fffe"
 
 

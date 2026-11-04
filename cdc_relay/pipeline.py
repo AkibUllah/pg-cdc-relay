@@ -104,10 +104,10 @@ class Relay:
 
     # -- input ---------------------------------------------------------------------------------
 
-    def handle(self, payload: bytes, wal_end: int = 0) -> None:
+    def handle(self, payload: bytes) -> None:
         message = decode(payload)
         self.metrics.inc("cdc_messages_total", type=type(message).__name__)
-        for tx in self.assembler.feed(message, wal_end):
+        for tx in self.assembler.feed(message):
             self._accept(tx)
         if len(self._records) >= self.batch_max_records:
             self.flush()

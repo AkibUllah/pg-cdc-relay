@@ -36,7 +36,7 @@ class TransactionAssembler:
     def in_transaction(self) -> bool:
         return self._open is not None
 
-    def feed(self, message: pg.Message, wal_end: int = 0) -> list[Transaction]:
+    def feed(self, message: pg.Message) -> list[Transaction]:
         """Consume one decoded message; return the transactions it completed (usually none)."""
         if isinstance(message, pg.Relation):
             self.relations[message.oid] = message
@@ -49,9 +49,14 @@ class TransactionAssembler:
             self._open = _Open(begin=message)
             return []
         if isinstance(message, pg.LogicalMessage) and not message.transactional:
+            # A non-transactional message reports the *end* of its WAL record, which can be the
+            # very position where the next commit record starts (the server sends the message
+            # first). One byte earlier is still inside the message record, so it orders before
+            # that commit and after every earlier one, and the derived ids never collide.
+            position = message.lsn - 1
             event = ChangeEvent(
                 op=MESSAGE,
-                commit_lsn=message.lsn,
+                commit_lsn=position,
                 seq=0,
                 prefix=message.prefix,
                 content=message.content,
@@ -59,8 +64,8 @@ class TransactionAssembler:
             )
             return [
                 Transaction(
-                    commit_lsn=message.lsn,
-                    end_lsn=max(message.lsn, wal_end),
+                    commit_lsn=position,
+                    end_lsn=message.lsn,
                     xid=None,
                     commit_ts=None,
                     events=[event],

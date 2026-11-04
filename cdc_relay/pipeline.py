@@ -92,6 +92,10 @@ class Relay:
         self.sleep = sleep
         self.clock = clock
 
+        # Called while waiting to retry, so a long sink outage does not trip the server's
+        # wal_sender_timeout (the source sends a standby status update).
+        self.keepalive: Callable[[], None] | None = None
+
         self.assembler = TransactionAssembler()
         self.confirmed_lsn = self.checkpoint.load()
         self._idle_lsn = self.confirmed_lsn
@@ -219,9 +223,17 @@ class Relay:
         self.metrics.inc("cdc_batch_seconds_sum", self.clock() - started)
 
     def _sleep_or_stop(self, delay: float) -> bool:
-        if self.sleep is time.sleep:
-            return self.stop.wait(delay)
-        self.sleep(delay)
+        if self.sleep is not time.sleep:  # injected clock in tests
+            self.sleep(delay)
+            if self.keepalive:
+                self.keepalive()
+            return self.stop.is_set()
+        deadline = time.monotonic() + delay
+        while (left := deadline - time.monotonic()) > 0:
+            if self.stop.wait(min(left, 5.0)):
+                return True
+            if self.keepalive:
+                self.keepalive()
         return self.stop.is_set()
 
     def _reject(self, rejected: list[Rejected]) -> None:
@@ -233,6 +245,18 @@ class Relay:
                 dumps({"error": item.reason, "event": item.event.to_dict()}) for item in rejected
             )
             self.metrics.inc("cdc_records_dead_lettered_total", len(rejected))
+
+    def reset(self) -> None:
+        """Forget everything not yet confirmed, e.g. after the connection dropped.
+
+        The server resends from the slot's confirmed position on reconnect, so pending records
+        and a half-received transaction would otherwise be delivered twice.
+        """
+        self.assembler = TransactionAssembler()
+        self._records = []
+        self._pending_end = 0
+        self._pending_txs = 0
+        self._pending_since = None
 
     def status(self) -> dict:
         return {

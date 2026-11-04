@@ -1,0 +1,33 @@
+# Example relay config for the Swift Courier demo schema (cdc_relay/demo.py).
+# Every key is optional; environment variables (CDC_DSN, CDC_WEBHOOK_SECRET, ...) override it.
+dsn: postgresql://postgres:postgres@localhost:5432/postgres
+slot: cdc_relay
+publication: cdc_relay
+publication_tables: [public.parcels, public.riders, public.outbox, public.sync_scratch]
+checkpoint_path: state/relay.checkpoint.json
+dead_letter_path: state/deadletter.jsonl
+batch_max_records: 500
+batch_max_wait: 0.5
+
+sink:
+  type: stdout            # stdout | file | webhook | redis
+  # url: https://hooks.example.com/cdc
+  # secret: set CDC_WEBHOOK_SECRET instead of committing it
+  # redis_url: redis://localhost:6379/0
+  # stream_template: "cdc:{topic}"
+
+routing:
+  include: ["public.*"]
+  exclude: ["public.sync_*"]
+  topic_template: "swift.cdc.{table}"
+  drop_columns:
+    public.parcels: [notes]
+  mask_columns:
+    public.parcels: [recipient_phone]
+    public.riders: [phone]
+  mask_salt: demo-salt-change-me   # CDC_MASK_SALT in real deployments
+  message_prefixes: [heartbeat]
+  outbox:
+    table: public.outbox
+    message_prefix: outbox
+    topic_prefix: "swift.events."

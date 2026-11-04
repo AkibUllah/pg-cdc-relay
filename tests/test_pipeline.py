@@ -148,6 +148,28 @@ def test_retryable_errors_back_off_and_resend_the_same_batch() -> None:
     assert metrics.get("cdc_records_delivered_total") == 1
 
 
+def test_keepalive_runs_while_waiting_to_retry() -> None:
+    sink = ListSink(RetryableSinkError("down"), RetryableSinkError("down"))
+    r = relay(sink)
+    pings = []
+    r.keepalive = lambda: pings.append(r.feedback_lsn)
+    feed(r, [PARCELS, *tx_bytes(0x100, pgwire.insert(16390, ["1", "a"]))])
+    r.flush()
+    assert pings == [0, 0]  # nothing confirmed until the batch is delivered
+
+
+def test_reset_drops_unconfirmed_state() -> None:
+    sink = ListSink()
+    r = relay(sink)
+    feed(r, [PARCELS, *tx_bytes(0x100, pgwire.insert(16390, ["1", "a"]))])
+    feed(r, [pgwire.begin(0x200, 2)])
+    r.reset()
+    assert not r.has_pending and not r.assembler.in_transaction
+    feed(r, [PARCELS, *tx_bytes(0x100, pgwire.insert(16390, ["1", "a"]))])  # resent
+    r.flush()
+    assert sink.ids == ["0/100:0"]
+
+
 def test_gives_up_after_max_attempts_without_confirming() -> None:
     sink = ListSink(*[RetryableSinkError("down")] * 3)
     r = relay(sink, retry=RetryPolicy(max_attempts=3, jitter=0))

@@ -32,3 +32,6 @@ deadletter*.jsonl
 
 # Static demo build
 _site/
+
+# Relay state written by examples/relay.yaml
+state/

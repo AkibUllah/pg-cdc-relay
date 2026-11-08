@@ -144,3 +144,71 @@ def test_outbox_can_be_disabled() -> None:
     config = RoutingConfig(outbox=OutboxConfig(table=None, message_prefix=None))
     records, _ = route(config, outbox_row(), event("message", prefix="outbox", content=b"{}"))
     assert [r.topic for r in records] == ["public.outbox"]
+
+
+# -- snapshot rows (op "read") ---------------------------------------------------------------
+
+
+def read_event(table: str = "parcels", **kw):
+    return event("read", table=table, after={"id": 1, "status": "booked"}, key={"id": 1}, **kw)
+
+
+def test_read_rows_route_like_inserts_and_carry_the_snapshot_flag() -> None:
+    [record], _ = route(RoutingConfig(), read_event())
+    assert record.topic == "public.parcels"
+    assert record.headers == {"op": "read"}
+    assert record.key == '{"id":1}'
+    assert record.value["op"] == "read"
+    assert record.value["before"] is None
+    assert record.value["after"] == {"id": 1, "status": "booked"}
+    assert record.value["source"]["snapshot"] is True
+
+
+def test_read_rows_ignore_the_ops_filter_but_follow_table_filters() -> None:
+    config = RoutingConfig(include=["public.*"], exclude=["public.audit_*"], ops=["update"])
+    records, _ = route(
+        config,
+        read_event("parcels"),
+        read_event("audit_log"),
+        read_event(schema="billing", table="invoices"),
+    )
+    assert [r.topic for r in records] == ["public.parcels"]
+
+
+def test_read_rows_are_dropped_and_masked_like_changes() -> None:
+    config = RoutingConfig(
+        drop_columns={"public.riders": ["nid"]},
+        mask_columns={"public.riders": ["phone"]},
+        mask_salt="s3cret",
+    )
+    row = {"id": 7, "phone": "+8801711000000", "nid": "1990123456"}
+    [record], _ = route(config, event("read", table="riders", after=row, key={"id": 7}))
+    assert "nid" not in record.value["after"]
+    assert record.value["after"]["phone"].startswith("hmac:")
+
+
+def test_outbox_rows_in_a_snapshot_are_not_replayed_as_events() -> None:
+    row = outbox_row()
+    row.op = "read"
+    records, rejected = route(RoutingConfig(), row)
+    assert records == [] and rejected == []
+    router = Router(RoutingConfig())
+    assert router.snapshot_includes("public.outbox") is False
+    assert router.snapshot_includes("public.parcels") is True
+
+
+def test_outbox_rows_in_a_snapshot_with_published_table_changes() -> None:
+    row = outbox_row()
+    row.op = "read"
+    config = RoutingConfig(outbox=OutboxConfig(publish_table_changes=True))
+    [record], _ = route(config, row)
+    assert record.topic == "public.outbox"
+    assert record.headers == {"op": "read"}
+    assert "aggregate_type" not in record.headers
+
+
+def test_snapshot_includes_follows_include_and_exclude() -> None:
+    router = Router(RoutingConfig(include=["public.*"], exclude=["public.audit_*"]))
+    assert router.snapshot_includes("public.parcels")
+    assert not router.snapshot_includes("public.audit_log")
+    assert not router.snapshot_includes("billing.invoices")

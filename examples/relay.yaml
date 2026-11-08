@@ -4,6 +4,9 @@ dsn: postgresql://postgres:postgres@localhost:5432/postgres
 slot: cdc_relay
 publication: cdc_relay
 publication_tables: [public.parcels, public.riders, public.outbox, public.sync_scratch]
+# true: when the relay creates the slot, deliver the rows already in the published tables
+# first (op "read"), then stream from the slot's consistent point.
+snapshot: false
 checkpoint_path: state/relay.checkpoint.json
 dead_letter_path: state/deadletter.jsonl
 batch_max_records: 500

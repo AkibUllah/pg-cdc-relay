@@ -122,8 +122,15 @@ def cmd_slot(args: argparse.Namespace, settings: Settings) -> int:
         if args.action == "create":
             admin.check_server(conn)
             pub = admin.ensure_publication(conn, settings.publication, settings.publication_tables)
-            slot = admin.ensure_slot(conn, settings.slot)
             print(f"publication {settings.publication}: {'created' if pub else 'exists'}")
+            if settings.snapshot and admin.slot_status(conn, settings.slot) is None:
+                # A slot made here would have no snapshot; `run` creates it with one.
+                print(
+                    f"slot {settings.slot}: left to `cdc-relay run`, which creates it together "
+                    "with the initial snapshot"
+                )
+                return 0
+            slot = admin.ensure_slot(conn, settings.slot)
             print(f"slot {settings.slot}: {'created' if slot else 'exists'}")
         elif args.action == "drop":
             dropped = admin.drop_slot(conn, settings.slot)

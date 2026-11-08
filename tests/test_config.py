@@ -107,3 +107,22 @@ def test_build_sink_for_each_type(tmp_path) -> None:
     assert isinstance(build_sink(s.sink), WebhookSink)
     s.sink.type, s.sink.redis_url = "redis", "redis://localhost:6390/0"
     assert isinstance(build_sink(s.sink), RedisStreamSink)  # connects lazily
+
+
+def test_snapshot_is_off_by_default_and_set_from_file_or_env(tmp_path) -> None:
+    assert load_settings(env={}).snapshot is False
+    assert load_settings(write(tmp_path, "snapshot: true\n"), env={}).snapshot is True
+    for text, expected in [("1", True), ("yes", True), ("off", False), ("FALSE", False)]:
+        assert load_settings(env={"CDC_SNAPSHOT": text}).snapshot is expected
+
+
+def test_snapshot_values_that_are_not_booleans_are_errors(tmp_path) -> None:
+    with pytest.raises(ConfigError, match="CDC_SNAPSHOT"):
+        load_settings(env={"CDC_SNAPSHOT": "maybe"})
+    with pytest.raises(ConfigError, match="snapshot must be true or false"):
+        load_settings(write(tmp_path, "snapshot: 'false'\n"), env={})
+
+
+def test_snapshot_needs_the_relay_to_create_the_slot(tmp_path) -> None:
+    with pytest.raises(ConfigError, match="snapshot needs create_slot"):
+        load_settings(write(tmp_path, "snapshot: true\ncreate_slot: false\n"), env={})

@@ -46,6 +46,8 @@ class Settings:
     # None publishes every table (FOR ALL TABLES, needs superuser); otherwise "schema.table" list.
     publication_tables: list[str] | None = None
     create_slot: bool = True
+    # Deliver the rows that already exist when the relay creates the slot, as "read" records.
+    snapshot: bool = False
     checkpoint_path: str | None = "relay.checkpoint.json"
     dead_letter_path: str | None = None
     batch_max_records: int = 500
@@ -70,6 +72,13 @@ class Settings:
         required = {"webhook": "url", "file": "path", "redis": "redis_url"}.get(self.sink.type)
         if required and not getattr(self.sink, required):
             raise ConfigError(f"sink.type {self.sink.type} needs sink.{required}")
+        if not isinstance(self.snapshot, bool):
+            raise ConfigError(f"snapshot must be true or false, got {self.snapshot!r}")
+        if self.snapshot and not self.create_slot:
+            raise ConfigError(
+                "snapshot needs create_slot: the snapshot is exported by the connection that "
+                "creates the slot"
+            )
         if self.batch_max_records < 1 or self.batch_max_wait < 0:
             raise ConfigError("batch_max_records must be >= 1 and batch_max_wait >= 0")
         if not 0 <= self.status_port <= 65535:
@@ -99,10 +108,20 @@ def _build(cls: type, data: Mapping[str, Any], where: str) -> Any:
         raise ConfigError(f"{where}: {exc}") from exc
 
 
+def _flag(text: str) -> bool:
+    value = text.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"expected true or false, got {text!r}")
+
+
 ENV = {
     "CDC_DSN": ("dsn", str),
     "CDC_SLOT": ("slot", str),
     "CDC_PUBLICATION": ("publication", str),
+    "CDC_SNAPSHOT": ("snapshot", _flag),
     "CDC_CHECKPOINT_PATH": ("checkpoint_path", str),
     "CDC_DEAD_LETTER_PATH": ("dead_letter_path", str),
     "CDC_STATUS_PORT": ("status_port", int),

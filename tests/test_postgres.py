@@ -218,3 +218,236 @@ def test_reconnects_after_the_walsender_is_killed(conn, names, tmp_path) -> None
     assert run.source.reconnects >= 1
     ids = [r.id for r in sink.records]
     assert len(ids) == len(set(ids))
+
+
+# -- initial snapshot --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def table(conn):
+    name = f"snap_{uuid.uuid4().hex[:8]}"
+    yield name
+    conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {name}")
+    conn.commit()
+
+
+def snapshot_settings(slot, pub, tmp_path, *tables):
+    s = settings(slot, pub, tmp_path)
+    s.publication_tables = [f"public.{t}" for t in tables]
+    s.snapshot = True
+    s.batch_max_records = 100
+    return s
+
+
+def server_version(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SHOW server_version_num")
+        return int(cur.fetchone()[0])
+
+
+def apply(records, table_name):
+    """Fold read/insert/update/delete records into the current rows, by id."""
+    rows = {}
+    for r in records:
+        if r.topic != f"public.{table_name}":
+            continue
+        value = r.value
+        if value["op"] == "delete":
+            rows.pop(value["key"]["id"], None)
+        else:
+            rows[value["after"]["id"]] = value["after"]
+    return rows
+
+
+def test_snapshot_and_stream_meet_without_gaps_or_duplicates(conn, names, table, tmp_path):
+    slot, pub = names
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE TABLE {table} (id int PRIMARY KEY, n int NOT NULL)")
+        cur.execute(f"INSERT INTO {table} SELECT g, 0 FROM generate_series(1, 5000) g")
+    conn.commit()
+
+    stop_writing = threading.Event()
+
+    def writer() -> None:
+        w = psycopg2.connect(DSN)
+        w.autocommit = True
+        i = 0
+        with w.cursor() as cur:
+            while not stop_writing.is_set():
+                i += 1
+                cur.execute(f"UPDATE {table} SET n = n + 1 WHERE id = %s", (i % 5000 + 1,))
+                cur.execute(f"INSERT INTO {table} VALUES (%s, 0)", (10000 + i,))
+                if i % 3 == 0:
+                    cur.execute(f"DELETE FROM {table} WHERE id = %s", (i % 5000 + 1,))
+        w.close()
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    time.sleep(0.2)
+    sink = ListSink()
+    run = Running(snapshot_settings(slot, pub, tmp_path, table), sink)
+    try:
+        time.sleep(0.5)
+        stop_writing.set()
+        thread.join(timeout=10)
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {table} VALUES (-1, -1)")  # sentinel, after every write
+        conn.commit()
+        wait_for(lambda: any(r.key == '{"id":-1}' for r in list(sink.records)), timeout=30)
+    finally:
+        run.stop()
+
+    reads = [r for r in sink.records if r.value["op"] == "read"]
+    changes = [r for r in sink.records if r.value["op"] != "read"]
+    assert reads and changes  # the writer was busy on both sides of the consistent point
+    snapshot = run.source.snapshot
+    assert snapshot["state"] == "done" and snapshot["rows"] == len(reads)
+    point = parse_lsn(snapshot["consistent_point"])
+    assert all(r.commit_lsn < point for r in reads)
+    assert all(r.commit_lsn >= point for r in changes)
+    assert sink.records.index(reads[-1]) < sink.records.index(changes[0])
+    ids = [r.id for r in sink.records]
+    assert len(ids) == len(set(ids))
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, n FROM {table}")
+        expected = dict(cur.fetchall())
+    folded = apply(sink.records, table)
+    assert {k: v["n"] for k, v in folded.items()} == expected
+    assert run.relay.metrics.total("cdc_snapshot_rows_total") == len(reads)
+
+
+def test_snapshot_values_match_streamed_values(conn, names, table, tmp_path) -> None:
+    slot, pub = names
+    generated = "GENERATED ALWAYS AS (qty * 2) STORED"
+    columns = f"""
+        id int PRIMARY KEY, code text, qty int, doubled int {generated},
+        price numeric(12, 2), weight float8, paid boolean, ref uuid,
+        booked_at timestamptz, due date, meta jsonb, tags text[], blob bytea,
+        note varchar(40)
+    """
+    values = """
+        %s, 'SC-ঢাকা-1', 3, 1250.50, 2.5, true, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+        '2026-11-08 09:30:00+06', '2026-11-09', '{"fragile": true, "n": [1, 2]}',
+        ARRAY['a', 'b c', NULL], '\\xdeadbeef', NULL
+    """
+    insert = f"INSERT INTO {table} (id, code, qty, price, weight, paid, ref, booked_at, due, "
+    insert += f"meta, tags, blob, note) VALUES ({values})"
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE TABLE {table} ({columns})")
+        cur.execute(insert, (1,))
+    conn.commit()
+    sink = ListSink()
+    run = Running(snapshot_settings(slot, pub, tmp_path, table), sink)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET TimeZone = 'Asia/Dhaka'")
+            cur.execute(insert, (2,))
+        conn.commit()
+        wait_for(lambda: len(sink.records) == 2)
+    finally:
+        run.stop()
+    read, insert_record = sink.records
+    assert (read.value["op"], insert_record.value["op"]) == ("read", "insert")
+    a, b = dict(read.value["after"]), dict(insert_record.value["after"])
+    assert (a.pop("id"), b.pop("id")) == (1, 2)
+    assert a == b
+    assert a["price"] == "1250.50" and a["booked_at"] == "2026-11-08T03:30:00Z"
+    assert a["tags"] == ["a", "b c", None] and a["blob"] == "deadbeef"
+    # generated columns are only streamed when PostgreSQL 18 publishes them
+    assert "doubled" not in a
+    assert read.value["key"] == {"id": 1} and read.value["source"]["snapshot"] is True
+
+
+def test_unfinished_snapshot_is_taken_again_with_a_new_slot(conn, names, table, tmp_path):
+    slot, pub = names
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE TABLE {table} (id int PRIMARY KEY)")
+        cur.execute(f"INSERT INTO {table} SELECT generate_series(1, 300)")
+    conn.commit()
+    s = snapshot_settings(slot, pub, tmp_path, table)
+
+    class FailingSink(ListSink):
+        def send(self, records) -> None:
+            if len(self.records) >= 100:
+                raise RuntimeError("process killed mid-snapshot")
+            super().send(records)
+
+    relay = Relay(
+        Router(s.routing), FailingSink(), checkpoint=FileCheckpoint(s.checkpoint_path, slot)
+    )
+    with pytest.raises(RuntimeError, match="killed"):
+        ReplicationSource(s, relay).prepare()
+    assert admin.slot_status(conn, slot) is None  # dropped, so nothing streams past the gap
+    assert FileCheckpoint(s.checkpoint_path, slot).snapshot_state() == "pending"
+
+    # a hard crash leaves the slot behind: the pending state still forces a fresh snapshot
+    admin.ensure_slot(conn, slot)
+    old = admin.slot_status(conn, slot)["confirmed_flush_lsn"]
+    sink = ListSink()
+    run = Running(s, sink)
+    run.stop()
+    assert len(sink.records) == 300 and {r.value["op"] for r in sink.records} == {"read"}
+    assert parse_lsn(admin.slot_status(conn, slot)["confirmed_flush_lsn"]) > parse_lsn(old)
+    assert FileCheckpoint(s.checkpoint_path, slot).snapshot_state() == "done"
+
+    # and once done, a restart streams on without reading the table again
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {table} VALUES (301)")
+    conn.commit()
+    again = ListSink()
+    run = Running(s, again)
+    try:
+        wait_for(lambda: len(again.records) == 1)
+    finally:
+        run.stop()
+    assert again.records[0].value["op"] == "insert"
+
+
+def test_snapshot_follows_row_filters_and_column_lists(conn, names, table, tmp_path) -> None:
+    if server_version(conn) < 150000:
+        pytest.skip("row filters and column lists need PostgreSQL 15")
+    slot, pub = names
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE TABLE {table} (id int PRIMARY KEY, status text, secret text)")
+        cur.execute(
+            f"INSERT INTO {table} VALUES (1, 'booked', 'x'), (2, 'draft', 'y'), (3, 'booked', 'z')"
+        )
+        cur.execute(
+            f"CREATE PUBLICATION {pub} FOR TABLE {table} (id, status) WHERE (status <> 'draft')"
+        )
+    conn.commit()
+    sink = ListSink()
+    run = Running(snapshot_settings(slot, pub, tmp_path, table), sink)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {table} VALUES (4, 'booked', 'w'), (5, 'draft', 'v')")
+        conn.commit()
+        wait_for(lambda: len(sink.records) == 3)
+        time.sleep(0.3)
+    finally:
+        run.stop()
+    seen = [(r.value["op"], r.value["after"]) for r in sink.records]
+    assert seen == [
+        ("read", {"id": 1, "status": "booked"}),
+        ("read", {"id": 3, "status": "booked"}),
+        ("insert", {"id": 4, "status": "booked"}),
+    ]
+
+
+def test_slot_create_leaves_a_snapshot_slot_to_run(conn, names, monkeypatch, capsys) -> None:
+    from cdc_relay import cli
+
+    slot, pub = names
+    for var, value in {
+        "CDC_DSN": DSN,
+        "CDC_SLOT": slot,
+        "CDC_PUBLICATION": pub,
+        "CDC_SNAPSHOT": "true",
+    }.items():
+        monkeypatch.setenv(var, value)
+    assert cli.main(["slot", "create"]) == 0
+    out = capsys.readouterr().out
+    assert f"publication {pub}: created" in out and "left to `cdc-relay run`" in out
+    assert admin.slot_status(conn, slot) is None

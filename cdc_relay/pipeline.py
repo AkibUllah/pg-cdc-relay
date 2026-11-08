@@ -183,6 +183,22 @@ class Relay:
         self._pending_since = None
         return self.confirmed_lsn
 
+    def deliver(self, records: list[Record]) -> None:
+        """Deliver records from outside the stream, such as the initial snapshot.
+
+        Same retries, dead letter handling and metrics as streamed batches; returns once the
+        sink accepted them. The confirmed position does not move: these records have none.
+        """
+        if records:
+            self._deliver(records)
+
+    def start_at(self, lsn: int) -> None:
+        """Start from a new slot's position (after its snapshot), never moving backwards."""
+        if lsn > self.confirmed_lsn:
+            self.confirmed_lsn = lsn
+            self._idle_lsn = max(self._idle_lsn, lsn)
+            self.metrics.set("cdc_confirmed_lsn", lsn)
+
     def _deliver(self, records: list[Record]) -> None:
         started = self.clock()
         attempt = 0

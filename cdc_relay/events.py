@@ -9,6 +9,8 @@ from typing import Any
 from cdc_relay.lsn import format_lsn
 
 INSERT, UPDATE, DELETE, TRUNCATE, MESSAGE = "insert", "update", "delete", "truncate", "message"
+# A row that already existed when the slot was created, read by the initial snapshot.
+READ = "read"
 
 
 @dataclass
@@ -62,6 +64,8 @@ class ChangeEvent:
         }
         if self.origin:
             source["origin"] = self.origin
+        if self.op == READ:
+            source["snapshot"] = True
         out: dict[str, Any] = {"id": self.id, "op": self.op}
         if self.op == MESSAGE:
             text = self.content_text()

@@ -20,7 +20,16 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from typing import Any
 
-from cdc_relay.events import DELETE, INSERT, MESSAGE, TRUNCATE, UPDATE, ChangeEvent, Transaction
+from cdc_relay.events import (
+    DELETE,
+    INSERT,
+    MESSAGE,
+    READ,
+    TRUNCATE,
+    UPDATE,
+    ChangeEvent,
+    Transaction,
+)
 from cdc_relay.lsn import format_lsn
 
 TABLE_OPS = (INSERT, UPDATE, DELETE, TRUNCATE)
@@ -109,6 +118,17 @@ class Router:
             fnmatchcase(qualified_table, p) for p in c.exclude
         )
 
+    def snapshot_includes(self, qualified_table: str) -> bool:
+        """Whether the initial snapshot reads this table at all.
+
+        The outbox table is skipped unless its row changes are published as table records:
+        rows already in it are events from before the relay started, not new ones to emit.
+        """
+        outbox = self.config.outbox
+        if outbox.table and qualified_table == outbox.table:
+            return outbox.publish_table_changes
+        return self.includes(qualified_table)
+
     def route(self, tx: Transaction) -> tuple[list[Record], list[Rejected]]:
         records: list[Record] = []
         rejected: list[Rejected] = []
@@ -142,6 +162,9 @@ class Router:
             return out
 
         name = event.qualified_table or ""
+        if event.op == READ:
+            # Snapshot rows follow the table filters, not ``ops``: they are not changes.
+            return [self._table_record(event)] if self.snapshot_includes(name) else []
         if outbox.table and name == outbox.table:
             records = [self._outbox_from_row(event)] if event.op == INSERT else []
             if outbox.publish_table_changes and event.op in self.config.ops:

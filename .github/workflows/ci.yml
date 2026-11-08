@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: ["14", "16", "17"]
+        postgres: ["14", "16", "17", "18"]
     env:
       TEST_PG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
@@ -79,6 +79,29 @@ jobs:
           PY
           cdc-relay -c examples/relay.yaml replay capture.jsonl --sink file --out records.jsonl
           test "$(grep -c swift.events.parcel records.jsonl)" -eq 6
+      - name: Initial snapshot of the demo tables with the CLI
+        env:
+          CDC_DSN: ${{ env.TEST_PG_DSN }}
+          CDC_SLOT: cdc_snapshot
+          CDC_SNAPSHOT: "true"
+          CDC_SINK: file
+          CDC_SINK_PATH: snapshot.jsonl
+          CDC_CHECKPOINT_PATH: snapshot.checkpoint.json
+          CDC_STATUS_PORT: "0"
+        run: |
+          timeout -s INT 15 cdc-relay -c examples/relay.yaml run || test $? -eq 124
+          python - <<'PY'
+          import json, psycopg2
+          records = [json.loads(line) for line in open("snapshot.jsonl")]
+          tables = ("swift.cdc.parcels", "swift.cdc.riders")
+          reads = [r for r in records if r["value"]["op"] == "read" and r["topic"] in tables]
+          with psycopg2.connect("${{ env.TEST_PG_DSN }}") as conn, conn.cursor() as cur:
+              cur.execute("SELECT (SELECT count(*) FROM parcels) + (SELECT count(*) FROM riders)")
+              expected = cur.fetchone()[0]
+          assert len(reads) == expected > 0, (len(reads), expected)
+          assert json.load(open("snapshot.checkpoint.json"))["snapshot"] == "done"
+          print(f"snapshot delivered {len(reads)} rows")
+          PY
 
   docker:
     name: docker compose smoke test

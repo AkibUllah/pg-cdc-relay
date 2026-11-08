@@ -12,7 +12,7 @@ looks the same whether it arrived as a ``read`` or as an ``insert``:
 * columns come from the publication (column lists and, on 18, published generated columns);
 * row filters of the publication (PostgreSQL 15+) apply;
 * the key comes from the table's replica identity, like the ``Relation`` message marks it;
-* values are read through the type's output function and converted by type OID.
+* values are the text the type's output function prints, converted by type OID.
 
 Positions: every snapshot record uses ``consistent_point - 1`` as its commit LSN and a running
 number as its sequence, so record ids are unique, Redis Stream entry ids grow, and everything
@@ -26,7 +26,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from psycopg2 import sql
+from psycopg2 import extensions, sql
 
 from cdc_relay.events import READ, ChangeEvent, Transaction
 from cdc_relay.lsn import format_lsn
@@ -122,14 +122,12 @@ def published_tables(cur, publication: str, server_version: int) -> list[Snapsho
 
 
 def select_rows(table: SnapshotTable) -> sql.Composed:
-    """Every column as text (what the output function prints), honouring the row filter.
+    """Every published column, honouring the row filter.
 
     ``ONLY`` keeps inheritance children out (they are published separately); a partitioned
     table has no rows of its own, so it is read whole when published via its root.
     """
-    columns = sql.SQL(", ").join(
-        sql.SQL("{}::text").format(sql.Identifier(c.name)) for c in table.columns
-    )
+    columns = sql.SQL(", ").join(sql.Identifier(c.name) for c in table.columns)
     query = sql.SQL("SELECT {} FROM {}{}").format(
         columns if table.columns else sql.SQL("NULL"),
         sql.SQL("" if table.partitioned else "ONLY "),
@@ -139,6 +137,19 @@ def select_rows(table: SnapshotTable) -> sql.Composed:
         # Catalog text from pg_get_expr, already a complete boolean expression.
         query = sql.Composed([query, sql.SQL(" WHERE "), sql.SQL(table.row_filter)])
     return query
+
+
+def read_as_text(conn, tables: Sequence[SnapshotTable]) -> None:
+    """Make the connection return the server's text for every column type of these tables.
+
+    The server sends each value through the type's output function, exactly what pgoutput
+    streams. Casting in SQL would not be the same: ``true::text`` is ``true``, while the
+    boolean output function prints ``t``.
+    """
+    oids = tuple(sorted({c.type_oid for t in tables for c in t.columns}))
+    if oids:
+        raw = extensions.new_type(oids, "CDC_SNAPSHOT_TEXT", lambda value, cur: value)
+        extensions.register_type(raw, conn)
 
 
 def row_event(table: SnapshotTable, values: Sequence[str | None], position: int) -> ChangeEvent:

@@ -263,3 +263,49 @@ def test_file_checkpoint_round_trip_and_slot_guard(tmp_path) -> None:
 def test_batch_size_is_validated() -> None:
     with pytest.raises(ValueError):
         relay(batch_max_records=0)
+
+
+def test_file_checkpoint_keeps_the_snapshot_state_across_saves(tmp_path) -> None:
+    path = str(tmp_path / "relay.checkpoint.json")
+    cp = FileCheckpoint(path, "a")
+    assert cp.snapshot_state() is None
+    cp.save_snapshot("pending")
+    assert FileCheckpoint(path, "a").snapshot_state() == "pending"
+    assert FileCheckpoint(path, "a").load() == 0
+    cp.save_snapshot("done", 0x16B3748)
+    restarted = FileCheckpoint(path, "a")
+    assert restarted.load() == 0x16B3748
+    restarted.save(0x16B3800)  # delivering batches keeps the state
+    data = json.loads(open(path).read())
+    assert data["snapshot"] == "done" and data["lsn"] == "0/16B3800"
+    assert FileCheckpoint(path, "a").snapshot_state() == "done"
+
+
+def test_file_checkpoint_save_without_load_keeps_an_existing_state(tmp_path) -> None:
+    path = str(tmp_path / "relay.checkpoint.json")
+    FileCheckpoint(path, "a").save_snapshot("pending")
+    FileCheckpoint(path, "a").save(0x20)
+    assert json.loads(open(path).read())["snapshot"] == "pending"
+
+
+def test_old_checkpoints_without_a_snapshot_field_still_load(tmp_path) -> None:
+    path = tmp_path / "relay.checkpoint.json"
+    path.write_text('{"slot": "a", "lsn": "0/10", "updated_at": "2026-11-04T00:00:00Z"}')
+    cp = FileCheckpoint(str(path), "a")
+    assert cp.load() == 0x10 and cp.snapshot_state() is None
+    cp.save(0x20)
+    assert "snapshot" not in json.loads(path.read_text())
+
+
+def test_a_checkpoint_that_is_not_an_object_is_rejected(tmp_path) -> None:
+    path = tmp_path / "relay.checkpoint.json"
+    path.write_text("[1, 2]")
+    with pytest.raises(CheckpointError, match="belongs to slot None"):
+        FileCheckpoint(str(path), "a").load()
+
+
+def test_memory_checkpoint_snapshot_state() -> None:
+    cp = MemoryCheckpoint()
+    assert cp.snapshot_state() is None
+    cp.save_snapshot("done", 0x40)
+    assert (cp.snapshot_state(), cp.load()) == ("done", 0x40)

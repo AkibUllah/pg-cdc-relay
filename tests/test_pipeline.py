@@ -309,3 +309,55 @@ def test_memory_checkpoint_snapshot_state() -> None:
     assert cp.snapshot_state() is None
     cp.save_snapshot("done", 0x40)
     assert (cp.snapshot_state(), cp.load()) == ("done", 0x40)
+
+
+def snapshot_records(n: int, lsn: int = 0x16B3747):
+    from cdc_relay.snapshot import Column, Snapshot, SnapshotTable
+
+    table = SnapshotTable(1, "public", "parcels", False, [Column("id", 20, True)])
+    snap = Snapshot(Router(), lambda records: None, consistent_point=lsn + 1)
+    return snap.route(table, [(str(i),) for i in range(n)])
+
+
+def test_deliver_sends_outside_records_without_moving_the_position() -> None:
+    sink = ListSink(RetryableSinkError("busy"))
+    checkpoint = MemoryCheckpoint()
+    r = relay(sink, checkpoint=checkpoint)
+    r.deliver(snapshot_records(3))
+    assert sink.calls == 2  # retried like a streamed batch
+    assert sink.ids == ["0/16B3747:0", "0/16B3747:1", "0/16B3747:2"]
+    assert r.confirmed_lsn == 0 and checkpoint.saves == 0 and not r.has_pending
+    assert r.metrics.total("cdc_records_delivered_total") == 3
+    assert r.metrics.total("cdc_delivery_retries_total") == 1
+    r.deliver([])
+    assert sink.calls == 2
+
+
+def test_deliver_dead_letters_permanent_failures(tmp_path) -> None:
+    dead = FileSink(str(tmp_path / "dead.jsonl"))
+    r = relay(ListSink(PermanentSinkError("422")), dead_letter=dead)
+    r.deliver(snapshot_records(2))
+    dead.close()
+    lines = (tmp_path / "dead.jsonl").read_text().splitlines()
+    assert [json.loads(line)["record"]["value"]["op"] for line in lines] == ["read", "read"]
+
+
+def test_deliver_stops_when_asked_during_retries() -> None:
+    r = relay(ListSink(RetryableSinkError("down"), RetryableSinkError("down")))
+    r.stop.set()
+    with pytest.raises(RelayStopped):
+        r.deliver(snapshot_records(1))
+
+
+def test_start_at_moves_to_a_new_slot_position_but_never_back() -> None:
+    sink = ListSink()
+    r = relay(sink)
+    r.start_at(0x500)
+    assert r.confirmed_lsn == 0x500 and r.feedback_lsn == 0x500
+    assert r.metrics.get("cdc_confirmed_lsn") == 0x500
+    r.start_at(0x100)
+    assert r.confirmed_lsn == 0x500
+    # a transaction the new slot would never send again is still skipped
+    feed(r, [PARCELS, *tx_bytes(0x400, pgwire.insert(16390, ["1", "booked"]))])
+    r.flush()
+    assert sink.ids == []

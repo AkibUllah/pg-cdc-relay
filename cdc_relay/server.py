@@ -75,6 +75,8 @@ class StatusServer:
 
 def heartbeat_health(source: Any, max_age: float) -> Callable[[], bool]:
     def healthy() -> bool:
-        return bool(source.connected) and time.monotonic() - source.heartbeat < max_age
+        # Reading the initial snapshot counts as alive: it keeps the heartbeat fresh per batch.
+        active = source.connected or getattr(source, "snapshotting", False)
+        return bool(active) and time.monotonic() - source.heartbeat < max_age
 
     return healthy

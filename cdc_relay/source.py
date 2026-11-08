@@ -12,9 +12,10 @@ from typing import Any
 import psycopg2
 from psycopg2.extras import LogicalReplicationConnection
 
-from cdc_relay import admin
+from cdc_relay import admin, snapshot
+from cdc_relay.checkpoint import SNAPSHOT_DONE, SNAPSHOT_PENDING
 from cdc_relay.config import Settings
-from cdc_relay.lsn import format_lsn
+from cdc_relay.lsn import format_lsn, parse_lsn
 from cdc_relay.pipeline import Relay, RelayError, RelayStopped
 
 log = logging.getLogger("cdc_relay.source")
@@ -37,19 +38,23 @@ class ReplicationSource:
         self.heartbeat = time.monotonic()
         self.reconnects = 0
         self.slot: dict[str, Any] | None = None
+        self.snapshotting = False
+        self.snapshot: dict[str, Any] | None = None
 
     # -- setup ---------------------------------------------------------------------------------
 
     def prepare(self) -> None:
         conn = self.connect(self.settings.dsn)
         try:
-            admin.check_server(conn)
+            server = admin.check_server(conn)
             if self.settings.create_slot:
                 if admin.ensure_publication(
                     conn, self.settings.publication, self.settings.publication_tables
                 ):
                     log.info("created publication %s", self.settings.publication)
-                if admin.ensure_slot(conn, self.settings.slot):
+                if self.settings.snapshot:
+                    self._prepare_snapshot(conn, server["server_version_num"])
+                elif admin.ensure_slot(conn, self.settings.slot):
                     log.info("created replication slot %s", self.settings.slot)
             self.slot = admin.slot_status(conn, self.settings.slot)
             if self.slot is None:
@@ -58,6 +63,106 @@ class ReplicationSource:
                 )
         finally:
             conn.close()
+
+    # -- initial snapshot ------------------------------------------------------------------------
+
+    def _prepare_snapshot(self, conn, server_version: int) -> None:
+        """Create the slot together with a snapshot of the existing rows, once.
+
+        The snapshot only exists while the connection that created the slot is open, so it is
+        taken when the relay creates the slot, and a snapshot that did not finish (the
+        checkpoint still says pending) is redone from scratch with a new slot.
+        """
+        slot = self.settings.slot
+        checkpoint = self.relay.checkpoint
+        state = checkpoint.snapshot_state()
+        exists = admin.slot_status(conn, slot) is not None
+        if exists and state == SNAPSHOT_PENDING:
+            log.warning("the initial snapshot for slot %s did not finish; starting over", slot)
+            admin.drop_slot(conn, slot)
+            exists = False
+        if exists:
+            if state != SNAPSHOT_DONE:
+                log.info(
+                    "slot %s already exists; the initial snapshot only runs with a new slot", slot
+                )
+            return
+        checkpoint.save_snapshot(SNAPSHOT_PENDING)
+        try:
+            self.take_snapshot(server_version)
+        except BaseException:
+            # Without the slot the next start takes the snapshot again instead of streaming
+            # from a position whose earlier rows were never delivered.
+            self._drop_slot_quietly()
+            raise
+
+    def take_snapshot(self, server_version: int) -> dict[str, Any]:
+        s = self.settings
+        self.snapshotting = True
+        self.heartbeat = time.monotonic()
+        replication = self.connect(s.dsn, connection_factory=LogicalReplicationConnection)
+        try:
+            cur = replication.cursor()
+            # The replication protocol's CREATE_REPLICATION_SLOT exports the snapshot the slot
+            # starts from; the SQL function cannot.
+            cur.create_replication_slot(s.slot, output_plugin="pgoutput")
+            _, point, snapshot_name, _ = cur.fetchone()
+            consistent_point = parse_lsn(point)
+            log.info(
+                "created replication slot %s at %s; reading the initial snapshot",
+                s.slot,
+                point,
+            )
+            self.snapshot = {"state": "running", "consistent_point": point}
+            reader = self.connect(s.dsn)
+            try:
+                snapshot.begin(reader, snapshot_name)
+                with reader.cursor() as meta:
+                    tables = snapshot.published_tables(meta, s.publication, server_version)
+                snapshot.read_as_text(reader, tables)
+                snap = snapshot.Snapshot(
+                    self.relay.router,
+                    self.relay.deliver,
+                    consistent_point=consistent_point,
+                    batch_size=s.batch_max_records,
+                    on_rows=self._snapshot_progress,
+                )
+                result = snap.read(reader, tables)
+                reader.rollback()
+            finally:
+                reader.close()
+        finally:
+            replication.close()
+            self.snapshotting = False
+        self.relay.checkpoint.save_snapshot(SNAPSHOT_DONE, consistent_point)
+        self.relay.start_at(consistent_point)
+        self.snapshot = {"state": "done", **result.to_dict()}
+        self.relay.metrics.set("cdc_snapshot_completed", 1)
+        log.info(
+            "initial snapshot done: %d rows from %d tables, %d records",
+            result.rows,
+            len(result.tables),
+            result.records,
+        )
+        return self.snapshot
+
+    def _snapshot_progress(self, table: str, rows: int) -> None:
+        self.heartbeat = time.monotonic()
+        self.relay.metrics.inc("cdc_snapshot_rows_total", rows, table=table)
+        if self.stop.is_set():
+            raise RelayStopped("stopped during the initial snapshot")
+
+    def _drop_slot_quietly(self) -> None:
+        try:
+            conn = self.connect(self.settings.dsn)
+            try:
+                admin.drop_slot(conn, self.settings.slot)
+            finally:
+                conn.close()
+        except psycopg2.Error as exc:
+            log.warning(
+                "could not drop slot %s after a failed snapshot: %s", self.settings.slot, exc
+            )
 
     def poll_lag(self) -> None:
         try:
@@ -149,5 +254,6 @@ class ReplicationSource:
             "connected": self.connected,
             "reconnects": self.reconnects,
             "slot": self.slot,
+            "snapshot": self.snapshot,
             "relay": self.relay.status(),
         }

@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Initial snapshot** (`snapshot: true` / `CDC_SNAPSHOT`): when the relay creates the slot, it creates it over the replication protocol, reads the published tables inside the exported snapshot and delivers the rows as `read` records before streaming from the slot's consistent point, so nothing is missed or read twice.
+  - columns, row filters (15+), generated columns (18) and keys follow the publication and the replica identity; values are the output-function text pgoutput streams
+  - routing applies (except the `ops` filter); the outbox table is skipped unless its table changes are published
+  - the checkpoint file records the snapshot state; an unfinished snapshot is redone with a new slot
+  - `cdc_snapshot_rows_total{table}`, `cdc_snapshot_completed`, a `snapshot` block in `/status`, and `/healthz` stays healthy while it runs
+- PostgreSQL 18 in the end-to-end CI matrix, and a CLI snapshot smoke test.
+
+### Changed
+
+- `cdc-relay slot create` only creates the publication when `snapshot` is on, leaving the slot to `run`.
+
 ## [0.1.0] - 2026-11-04
 
 ### Added
